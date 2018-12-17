@@ -1,0 +1,135 @@
+#!/usr/bin/env php
+<?php
+declare(strict_types = 1);
+
+/**
+ * Copyright 2018 Tobias Gies
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+class MumblePingRequest {
+    const PACKET_TYPE_PING = 0;
+    const REQUEST_LENGTH = 12;
+
+    private $ident;
+
+    public function __construct() {
+        $this->ident = rand(0, PHP_INT_MAX);
+    }
+
+    public function toBinary(): string {
+        return pack("NJ", self::PACKET_TYPE_PING, $this->ident);
+    }
+
+    public function matches(MumblePingResponse $response): bool {
+        return $this->ident == $response->ident;
+    }
+}
+
+class MumblePingResponse {
+    const RESPONSE_LENGTH = 24;
+
+    public $majorVersion;
+    public $minorVersion;
+    public $patchVersion;
+    public $ident;
+    public $connected;
+    public $slots;
+    public $bandwidth;
+
+    private function __construct(
+        int $majorVersion,
+        int $minorVersion,
+        int $patchVersion,
+        int $ident,
+        int $connected,
+        int $slots,
+        int $bandwidth
+    )  {
+        $this->majorVersion = $majorVersion;
+        $this->minorVersion = $minorVersion;
+        $this->patchVersion = $patchVersion;
+        $this->ident = $ident;
+        $this->connected = $connected;
+        $this->slots = $slots;
+        $this->bandwidth = $bandwidth;
+    }
+
+    public static function fromBinary(string $input) {
+        $data = unpack("nmajor/cminor/cpatch/Jident/Nconnected/Nslots/Nbandwidth", $input);
+        return new self(
+            $data['major'],
+            $data['minor'],
+            $data['patch'],
+            $data['ident'],
+            $data['connected'],
+            $data['slots'],
+            $data['bandwidth']
+        );
+    }
+
+    public function version(): string {
+        return "{$this->majorVersion}.{$this->minorVersion}.{$this->patchVersion}";
+    }
+}
+
+class MumbleServer {
+    const SOCKET_TIMEOUT = 2;
+
+    private $host;
+    private $port;
+
+    public function __construct(string $host, int $port) {
+        $this->host = $host;
+        $this->port = $port;
+    }
+
+    public function ping(): MumblePingResponse {
+        $socket = socket_create(AF_INET, SOCK_DGRAM, SOL_UDP);
+        socket_set_option($socket, SOL_SOCKET, SO_RCVTIMEO, array("sec" => self::SOCKET_TIMEOUT, "usec" => 0));
+        $request = new MumblePingRequest();
+
+        if (socket_sendto($socket, $request->toBinary(), MumblePingRequest::REQUEST_LENGTH, 0, $this->host, $this->port) === false) {
+            throw new Exception("Could not ping {$this->host}:{$this->port}: " . socket_strerror(socket_last_error()));
+        }
+
+        if (socket_recv($socket, $responseBin, MumblePingResponse::RESPONSE_LENGTH, MSG_WAITALL) === false) {
+            throw new Exception("Failed to read {$this->host}:{$this->port}: " . socket_strerror(socket_last_error()));
+        }
+
+        $response = MumblePingResponse::fromBinary($responseBin);
+        if (!$request->matches($response)) {
+            throw new Exception("Response ID {$response->ident} does not match request ID.");
+        }
+        return $response;
+    }
+}
+
+function usageError() {
+    echo "Check if a Mumble server is alive - usage: " . __FILE__ . " <hostname> <port>" . PHP_EOL;
+    exit(64); // EX_USAGE - command line usage error
+}
+
+if ($argc !== 3) usageError();
+list ($scriptName, $host, $port) = $argv;
+if (empty($host) || empty($port) || !is_numeric($port)) usageError();
+
+try {
+    $response = (new MumbleServer($host, (int) $port))->ping();
+    echo "OK - Mumble {$response->version()}, {$response->connected} / {$response->slots} users online" . PHP_EOL;
+} catch (Exception $e) {
+    echo "CRITICAL - " . $e->getMessage() . PHP_EOL;
+    exit(2); // General error
+}
+
